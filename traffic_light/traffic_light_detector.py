@@ -75,10 +75,9 @@ class AsyncTrafficLightDetector(Node):
             durability=QoSDurabilityPolicy.VOLATILE
         )
 
-        # 2. 토픽 발행기 (competition_ws 미션매니저 및 제어 완벽 연동)
+        # 2. 토픽 발행기 (미션 매니저 연동 및 RViz2 디버그 전용 - cmd_vel 충돌 방지 완료)
         self.traf_pub = self.create_publisher(String, '/traffic_light', mission_qos)       # 소문자: red, yellow, green, none
         self.state_pub = self.create_publisher(String, '/traffic_state', 10)               # 대문자: RED, YELLOW, GREEN, NONE
-        self.cmd_pub = self.create_publisher(Twist, '/cmd_vel', 10)                        # 속도 제어
         self.debug_img_pub = self.create_publisher(Image, '/traffic_light/debug_image', 10)# RViz2용 디버그 영상
         self.yolo_img_pub = self.create_publisher(Image, '/yolo_image', 1)                 # 기존 competition 토픽 호환
         self.crop_img_pub = self.create_publisher(Image, '/traffic_light/cropped_image', 10)
@@ -109,7 +108,7 @@ class AsyncTrafficLightDetector(Node):
         self.get_logger().info("=" * 60)
         self.get_logger().info("🚦 [신호차 자율주행 완성형 노드 가동!]")
         self.get_logger().info("📡 대회 미션매니저 연동 토픽: /traffic_light (red, yellow, green)")
-        self.get_logger().info("📡 RViz2 실시간 영상 토픽: /traffic_light/debug_image")
+        self.get_logger().info("🛡️ [충돌 방지] /cmd_vel 직접 제어는 waypoints_follower에 일원화됨")
         self.get_logger().info("=" * 60)
 
     def image_callback(self, msg):
@@ -340,15 +339,17 @@ def main(args=None):
                     cv2.putText(upper_view, label_text, (x1, max(20, y1 - 8)),
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.6, box_color, 2, cv2.LINE_AA)
 
-            # 상태 변경 로그
+            # ------------------------------------------------------------------
+            # 📢 [상태 변경 로그 출력]
+            # ------------------------------------------------------------------
             if detected_state != last_state:
                 last_state = detected_state
                 if detected_state == "RED":
-                    node.get_logger().info("🔴 [RED] 신호 감지 -> 차량 정지 (0.0 m/s)")
+                    node.get_logger().info("🔴 [RED] 신호 감지 -> mission_manager에 'red' 보고 (정지)")
                 elif detected_state == "YELLOW":
-                    node.get_logger().info("🟡 [YELLOW] 신호 감지 -> 서행 감속 (0.1 m/s)")
+                    node.get_logger().info("🟡 [YELLOW] 신호 감지 -> mission_manager에 'yellow' 보고 (감속/정지)")
                 elif detected_state == "GREEN":
-                    node.get_logger().info("🟢 [GREEN] 신호 감지 -> 주행 출발 (0.3 m/s)")
+                    node.get_logger().info("🟢 [GREEN] 신호 감지 -> mission_manager에 'green' 보고 (출발)")
                 else:
                     node.get_logger().info("⚪ [NONE] 신호차 없음")
 
@@ -362,17 +363,7 @@ def main(args=None):
             state_msg.data = detected_state
             node.state_pub.publish(state_msg)
 
-            # 3) 차량 직접 속도 제어 (/cmd_vel)
-            twist_msg = Twist()
-            if detected_state == "RED":
-                twist_msg.linear.x = 0.0
-            elif detected_state == "YELLOW":
-                twist_msg.linear.x = 0.1
-            elif detected_state == "GREEN":
-                twist_msg.linear.x = 0.3
-            node.cmd_pub.publish(twist_msg)
-
-            # 4) RViz2 시각화 영상 토픽 발행 (/traffic_light/debug_image)
+            # 3) RViz2 시각화 영상 토픽 발행 (/traffic_light/debug_image)
             debug_view = upper_view.copy()
             status_text = f"STATE: {detected_state} (FPS: {fps})"
             text_color = (0, 0, 255) if detected_state == "RED" else (0, 255, 255) if detected_state == "YELLOW" else (0, 255, 0) if detected_state == "GREEN" else (200, 200, 200)
@@ -392,7 +383,7 @@ def main(args=None):
             except Exception:
                 pass
 
-            # 5) 화면 출력
+            # 4) 화면 출력
             cv2.imshow("Full Camera (YOLO Detection)", debug_view)
             cv2.imshow("HSV Mask (Debug)", combined_all)
 
