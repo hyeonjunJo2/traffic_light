@@ -4,7 +4,6 @@ from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data, QoSProfile, QoSReliabilityPolicy, QoSHistoryPolicy, QoSDurabilityPolicy
 from sensor_msgs.msg import Image
 from std_msgs.msg import String
-from geometry_msgs.msg import Twist
 import cv2
 import numpy as np
 import threading
@@ -26,11 +25,11 @@ CONFIG_PATH = os.path.join(BASE_DIR, 'hsv_config.json')
 CUSTOM_MODEL_PATH = os.path.join(BASE_DIR, 'best.pt')
 
 DEFAULT_CONFIG = {
-    "Brightness_Min_V": 120,
-    "Saturation_Min_S": 100,
-    "Red1_H_Max": 7,
-    "Red2_H_Min": 170,
-    "Yellow_H_Min": 8,
+    "Brightness_Min_V": 100,
+    "Saturation_Min_S": 80,
+    "Red1_H_Max": 12,
+    "Red2_H_Min": 165,
+    "Yellow_H_Min": 13,
     "Yellow_H_Max": 35,
     "Green_H_Min": 40,
     "Green_H_Max": 90,
@@ -75,7 +74,7 @@ class AsyncTrafficLightDetector(Node):
             durability=QoSDurabilityPolicy.VOLATILE
         )
 
-        # 2. 토픽 발행기 (미션 매니저 연동 및 RViz2 디버그 전용 - cmd_vel 충돌 방지 완료)
+        # 2. 토픽 발행기 (미션 매니저 연동 및 RViz2 디버그 전용)
         self.traf_pub = self.create_publisher(String, '/traffic_light', mission_qos)       # 소문자: red, yellow, green, none
         self.state_pub = self.create_publisher(String, '/traffic_state', 10)               # 대문자: RED, YELLOW, GREEN, NONE
         self.debug_img_pub = self.create_publisher(Image, '/traffic_light/debug_image', 10)# RViz2용 디버그 영상
@@ -108,7 +107,6 @@ class AsyncTrafficLightDetector(Node):
         self.get_logger().info("=" * 60)
         self.get_logger().info("🚦 [신호차 자율주행 완성형 노드 가동!]")
         self.get_logger().info("📡 대회 미션매니저 연동 토픽: /traffic_light (red, yellow, green)")
-        self.get_logger().info("🛡️ [충돌 방지] /cmd_vel 직접 제어는 waypoints_follower에 일원화됨")
         self.get_logger().info("=" * 60)
 
     def image_callback(self, msg):
@@ -188,11 +186,11 @@ def main(args=None):
     cv2.namedWindow(tuner_win, cv2.WINDOW_NORMAL)
     cv2.resizeWindow(tuner_win, 450, 480)
 
-    cv2.createTrackbar("Brightness (Min V)", tuner_win, cfg.get("Brightness_Min_V", 120), 255, nothing)
-    cv2.createTrackbar("Saturation (Min S)", tuner_win, cfg.get("Saturation_Min_S", 100), 255, nothing)
-    cv2.createTrackbar("Red1 H Max", tuner_win, cfg.get("Red1_H_Max", 7), 30, nothing)
-    cv2.createTrackbar("Red2 H Min", tuner_win, cfg.get("Red2_H_Min", 170), 180, nothing)
-    cv2.createTrackbar("Yellow H Min", tuner_win, cfg.get("Yellow_H_Min", 8), 60, nothing)
+    cv2.createTrackbar("Brightness (Min V)", tuner_win, cfg.get("Brightness_Min_V", 100), 255, nothing)
+    cv2.createTrackbar("Saturation (Min S)", tuner_win, cfg.get("Saturation_Min_S", 80), 255, nothing)
+    cv2.createTrackbar("Red1 H Max", tuner_win, cfg.get("Red1_H_Max", 12), 30, nothing)
+    cv2.createTrackbar("Red2 H Min", tuner_win, cfg.get("Red2_H_Min", 165), 180, nothing)
+    cv2.createTrackbar("Yellow H Min", tuner_win, cfg.get("Yellow_H_Min", 13), 60, nothing)
     cv2.createTrackbar("Yellow H Max", tuner_win, cfg.get("Yellow_H_Max", 35), 60, nothing)
     cv2.createTrackbar("Green H Min", tuner_win, cfg.get("Green_H_Min", 40), 120, nothing)
     cv2.createTrackbar("Green H Max", tuner_win, cfg.get("Green_H_Max", 90), 140, nothing)
@@ -308,6 +306,7 @@ def main(args=None):
 
             detected_state = "NONE"
             cropped_view = None
+            hsv_info_text = ""
 
             # 색상 판별
             if smooth_box is not None:
@@ -317,6 +316,19 @@ def main(args=None):
 
                 if (x2 - x1) > 10 and (y2 - y1) > 10:
                     cropped_view = upper_view[y1:y2, x1:x2]
+                    cropped_hsv = hsv_all[y1:y2, x1:x2]
+
+                    # 🔍 [실시간 픽셀 분석 계측기] 가장 밝은 중심 영역의 실제 H, S, V 평균값 계산
+                    ch, cw, _ = cropped_hsv.shape
+                    cx1, cy1 = int(cw * 0.25), int(ch * 0.25)
+                    cx2, cy2 = int(cw * 0.75), int(ch * 0.75)
+                    center_crop = cropped_hsv[cy1:cy2, cx1:cx2]
+                    
+                    if center_crop.size > 0:
+                        mean_h = int(np.mean(center_crop[:, :, 0]))
+                        mean_s = int(np.mean(center_crop[:, :, 1]))
+                        mean_v = int(np.mean(center_crop[:, :, 2]))
+                        hsv_info_text = f"Live HSV -> H:{mean_h:2d} | S:{mean_s:3d} | V:{mean_v:3d}"
 
                     r_cnt = cv2.countNonZero(r_mask_all[y1:y2, x1:x2])
                     y_cnt = cv2.countNonZero(y_mask_all[y1:y2, x1:x2])
@@ -335,9 +347,9 @@ def main(args=None):
                     box_color = (0, 0, 255) if detected_state == "RED" else (0, 255, 255) if detected_state == "YELLOW" else (0, 255, 0) if detected_state == "GREEN" else (255, 255, 0)
                     cv2.rectangle(upper_view, (x1, y1), (x2, y2), box_color, 2)
                     
-                    label_text = f"{detected_state} [{detect_source}]"
+                    label_text = f"{detected_state} [{detect_source}] (R:{r_cnt} Y:{y_cnt} G:{g_cnt})"
                     cv2.putText(upper_view, label_text, (x1, max(20, y1 - 8)),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.6, box_color, 2, cv2.LINE_AA)
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.55, box_color, 2, cv2.LINE_AA)
 
             # ------------------------------------------------------------------
             # 📢 [상태 변경 로그 출력]
@@ -369,6 +381,10 @@ def main(args=None):
             text_color = (0, 0, 255) if detected_state == "RED" else (0, 255, 255) if detected_state == "YELLOW" else (0, 255, 0) if detected_state == "GREEN" else (200, 200, 200)
             cv2.putText(debug_view, status_text, (20, 35), cv2.FONT_HERSHEY_SIMPLEX, 0.8, text_color, 2, cv2.LINE_AA)
 
+            # 🔍 화면 상단에 실시간 HSV 계측기 정보 출력!
+            if hsv_info_text:
+                cv2.putText(debug_view, hsv_info_text, (20, 65), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 255, 255), 2, cv2.LINE_AA)
+
             try:
                 debug_img_msg = Image()
                 debug_img_msg.header.stamp = node.get_clock().now().to_msg()
@@ -389,6 +405,8 @@ def main(args=None):
 
             if cropped_view is not None and cropped_view.size > 0:
                 zoom_display = cv2.resize(cropped_view, (250, 250), interpolation=cv2.INTER_LINEAR)
+                if hsv_info_text:
+                    cv2.putText(zoom_display, hsv_info_text, (10, 235), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 255, 255), 1, cv2.LINE_AA)
                 cv2.imshow("Traffic Light Zoom (Crop)", zoom_display)
                 zoom_win_opened = True
             else:
