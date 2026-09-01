@@ -11,11 +11,11 @@ import threading
 import time
 from datetime import datetime
 
-class SafeImageSaverNode(Node):
+class DualDatasetImageSaverNode(Node):
     def __init__(self):
-        super().__init__('image_saver_node')
+        super().__init__('dual_image_saver_node')
         
-        # RealSense 카메라 토픽 구독
+        # RealSense 카메라 영상 토픽 구독
         self.image_topic = '/camera/camera/color/image_raw'
         self.subscription = self.create_subscription(
             Image,
@@ -29,26 +29,35 @@ class SafeImageSaverNode(Node):
         self.latest_frame = None
         self.frame_lock = threading.Lock()
         
-        # 📁 저장 폴더 설정
+        # 📁 [폴더 1] 3색 신호등 (빨강/주황/초록 원형) 저장 폴더
         base_dir = os.path.dirname(os.path.abspath(__file__))
-        self.save_dir = os.path.join(base_dir, 'jb_light_dataset')
-        if not os.path.exists(self.save_dir):
-            os.makedirs(self.save_dir)
+        self.light_dir = os.path.join(base_dir, 'dataset_traffic_light')
+        if not os.path.exists(self.light_dir):
+            os.makedirs(self.light_dir)
+            
+        # 📁 [폴더 2] 화살표 / X 표시 (신호차 전광판) 저장 폴더
+        self.arrow_dir = os.path.join(base_dir, 'dataset_arrow_sign')
+        if not os.path.exists(self.arrow_dir):
+            os.makedirs(self.arrow_dir)
             
         # 🛡️ 덮어쓰기 방지: 기존 파일 카운트
-        existing_files = glob.glob(os.path.join(self.save_dir, 'jb_light_*.jpg'))
-        self.img_count = len(existing_files)
-        self.last_saved_name = ""
+        light_files = glob.glob(os.path.join(self.light_dir, 'light_*.jpg'))
+        arrow_files = glob.glob(os.path.join(self.arrow_dir, 'arrow_*.jpg'))
+        self.light_count = len(light_files)
+        self.arrow_count = len(arrow_files)
+        self.last_saved_info = ""
 
-        self.get_logger().info("=" * 60)
-        self.get_logger().info("🚀 [초고속 무지연 모드] 데이터 수집 노드 가동!")
-        self.get_logger().info(f"📂 저장 경로: {self.save_dir}")
-        self.get_logger().info(f"🔢 기존 사진: {self.img_count}장 (이 번호부터 시작)")
-        self.get_logger().info("👉 창 클릭 후 [s]: 저장 | [q] 또는 [ESC]: 종료")
-        self.get_logger().info("=" * 60)
+        self.get_logger().info("=" * 65)
+        self.get_logger().info("📸 [신호등 & 화살표 분리 수집기] 가동!")
+        self.get_logger().info(f"📂 [1번 폴더] 3색 신호등: {self.light_dir} (현재 {self.light_count}장)")
+        self.get_logger().info(f"📂 [2번 폴더] 화살표/X표시: {self.arrow_dir} (현재 {self.arrow_count}장)")
+        self.get_logger().info("-" * 65)
+        self.get_logger().info("👉 [1] 또는 [s] 키 : 🔴🟡🟢 3색 신호등 폴더에 저장")
+        self.get_logger().info("👉 [2] 또는 [a] 키 : ⬅️⬆️❌ 화살표/X표시 폴더에 저장")
+        self.get_logger().info("👉 [q] 또는 [ESC]  : 저장 종료")
+        self.get_logger().info("=" * 65)
 
     def image_callback(self, msg):
-        # 콜백에서는 변환 후 저장만 하고 0.001초 만에 즉시 리턴 (블로킹 완벽 방지)
         try:
             cv_img = self.bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
             with self.frame_lock:
@@ -58,9 +67,8 @@ class SafeImageSaverNode(Node):
 
 def main(args=None):
     rclpy.init(args=args)
-    node = SafeImageSaverNode()
+    node = DualDatasetImageSaverNode()
     
-    # 1. ROS 2 통신을 별도 백그라운드 스레드에서 실행 (메시지 밀림 현상 100% 제거)
     spin_thread = threading.Thread(target=rclpy.spin, args=(node,), daemon=True)
     spin_thread.start()
     
@@ -79,42 +87,54 @@ def main(args=None):
                 time.sleep(0.01)
                 continue
 
-            # FPS 측정
             frame_counter += 1
             if time.time() - fps_time >= 1.0:
                 fps = frame_counter
                 frame_counter = 0
                 fps_time = time.time()
 
-            # 화면 안내 텍스트 표시
+            # 화면 안내 HUD 오버레이
             display_img = current_frame.copy()
-            cv2.putText(display_img, f"FPS: {fps} | Saved: {node.img_count}", (15, 30), 
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2, cv2.LINE_AA)
-            cv2.putText(display_img, "Press 's' to Save, 'q' to Quit", (15, 60), 
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1, cv2.LINE_AA)
             
-            if node.last_saved_name:
-                cv2.putText(display_img, f"Last: {node.last_saved_name}", (15, 90), 
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1, cv2.LINE_AA)
+            # 상단 상태바 배경 박스
+            cv2.rectangle(display_img, (0, 0), (640, 95), (0, 0, 0), -1)
+            
+            # 카운터 및 안내 출력
+            cv2.putText(display_img, f"FPS: {fps} | [1] Light: {node.light_count} | [2] Arrow/X: {node.arrow_count}", (15, 25), 
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 255, 255), 2, cv2.LINE_AA)
+            cv2.putText(display_img, "[1] or [s]: Save 3-Color Light  |  [2] or [a]: Save Arrow/X Sign", (15, 55), 
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1, cv2.LINE_AA)
+            
+            if node.last_saved_info:
+                cv2.putText(display_img, f"Saved: {node.last_saved_info}", (15, 82), 
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 0), 1, cv2.LINE_AA)
 
-            cv2.imshow("YOLO Dataset Collector (Ultra-Fast)", display_img)
+            cv2.imshow("Dual Dataset Collector (Light vs Arrow)", display_img)
             
             key = cv2.waitKey(1) & 0xFF
+            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
             
-            # 's' 키: 원본(글자 없는 깨끗한 사진) 저장
-            if key == ord('s'):
-                node.img_count += 1
-                timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-                file_name = f'jb_light_{node.img_count:04d}_{timestamp}.jpg'
-                full_path = os.path.join(node.save_dir, file_name)
-                
+            # 🔴🟡🟢 1번 키 또는 's' 키: 3색 신호등 저장
+            if key == ord('1') or key == ord('s'):
+                node.light_count += 1
+                file_name = f'light_{node.light_count:04d}_{timestamp}.jpg'
+                full_path = os.path.join(node.light_dir, file_name)
                 cv2.imwrite(full_path, current_frame)
-                node.last_saved_name = file_name
-                node.get_logger().info(f"📸 [{node.img_count:04d}번째 저장 완료] {file_name}")
+                node.last_saved_info = f"[Light] {file_name}"
+                node.get_logger().info(f"🔴🟡🟢 [3색 신호등 저장 #{node.light_count:04d}] {file_name}")
+
+            # ⬅️⬆️❌ 2번 키 또는 'a' 키: 화살표 / X 표시 저장
+            elif key == ord('2') or key == ord('a'):
+                node.arrow_count += 1
+                file_name = f'arrow_{node.arrow_count:04d}_{timestamp}.jpg'
+                full_path = os.path.join(node.arrow_dir, file_name)
+                cv2.imwrite(full_path, current_frame)
+                node.last_saved_info = f"[Arrow/X] {file_name}"
+                node.get_logger().info(f"⬅️⬆️❌ [화살표/X표시 저장 #{node.arrow_count:04d}] {file_name}")
                 
             # 'q' 키 또는 ESC: 종료
             elif key == ord('q') or key == 27:
-                node.get_logger().info(f"🛑 총 {node.img_count}장 저장 완료. 프로그램을 종료합니다.")
+                node.get_logger().info(f"🛑 저장 종료: 3색 신호등 {node.light_count}장, 화살표 {node.arrow_count}장 수집 완료.")
                 break
 
     except KeyboardInterrupt:
