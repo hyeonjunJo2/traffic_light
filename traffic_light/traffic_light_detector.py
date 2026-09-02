@@ -407,15 +407,11 @@ def main(args=None):
                 zoom_display = cv2.resize(cropped_view, (250, 250), interpolation=cv2.INTER_LINEAR)
                 if hsv_info_text:
                     cv2.putText(zoom_display, hsv_info_text, (10, 235), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 255, 255), 1, cv2.LINE_AA)
-                cv2.imshow("Traffic Light Zoom (Crop)", zoom_display)
-                zoom_win_opened = True
             else:
-                if zoom_win_opened:
-                    try:
-                        cv2.destroyWindow("Traffic Light Zoom (Crop)")
-                    except Exception:
-                        pass
-                    zoom_win_opened = False
+                zoom_display = np.zeros((250, 250, 3), dtype=np.uint8)
+                cv2.putText(zoom_display, "WAITING DETECT...", (50, 125), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (100, 100, 100), 1, cv2.LINE_AA)
+
+            cv2.imshow("Traffic Light Zoom (Crop)", zoom_display)
 
             key = cv2.waitKey(1) & 0xFF
             if key == ord('s'):

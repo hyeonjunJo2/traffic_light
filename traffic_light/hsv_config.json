@@ -1,12 +1,12 @@
 {
-    "Brightness_Min_V": 120,
-    "Saturation_Min_S": 120,
-    "Red1_H_Max": 11,
+    "Brightness_Min_V": 140,
+    "Saturation_Min_S": 90,
+    "Red1_H_Max": 7,
     "Red2_H_Min": 170,
-    "Yellow_H_Min": 12,
+    "Yellow_H_Min": 8,
     "Yellow_H_Max": 35,
-    "Green_H_Min": 40,
+    "Green_H_Min": 35,
     "Green_H_Max": 90,
-    "YOLO_Conf_Thresh": 35,
+    "YOLO_Conf_Thresh": 55,
     "Min_Pixel_Count": 60
 }
