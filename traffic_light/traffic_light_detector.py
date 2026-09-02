@@ -81,6 +81,11 @@ class AsyncTrafficLightDetector(Node):
         self.yolo_img_pub = self.create_publisher(Image, '/yolo_image', 1)                 # 기존 competition 토픽 호환
         self.crop_img_pub = self.create_publisher(Image, '/traffic_light/cropped_image', 10)
         
+        # [토픽 안정화(Debouncing) 로직]
+        self.last_published_state = "none"
+        self.none_counter = 0
+        self.NONE_THRESHOLD = 15  # 15프레임(약 0.5초) 연속 NONE이어야만 진짜 NONE으로 인정
+
         self.latest_frame = None
         self.frame_lock = threading.Lock()
 
@@ -365,14 +370,23 @@ def main(args=None):
                 else:
                     node.get_logger().info("⚪ [NONE] 신호차 없음")
 
+            # [토픽 안정화(Debouncing) 로직 적용]
+            if detected_state != "NONE":
+                node.last_published_state = detected_state.lower()
+                node.none_counter = 0
+            else:
+                node.none_counter += 1
+                if node.none_counter >= node.NONE_THRESHOLD:
+                    node.last_published_state = "none"
+
             # 1) 대회 미션매니저 연동 토픽 (/traffic_light : 소문자 red, yellow, green, none)
             traf_msg = String()
-            traf_msg.data = detected_state.lower()
+            traf_msg.data = node.last_published_state
             node.traf_pub.publish(traf_msg)
 
             # 2) 표준 상태 토픽 (/traffic_state : 대문자 RED, YELLOW, GREEN, NONE)
             state_msg = String()
-            state_msg.data = detected_state
+            state_msg.data = node.last_published_state.upper()
             node.state_pub.publish(state_msg)
 
             # 3) RViz2 시각화 영상 토픽 발행 (/traffic_light/debug_image)
