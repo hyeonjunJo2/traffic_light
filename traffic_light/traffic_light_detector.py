@@ -3,7 +3,7 @@ import rclpy
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data, QoSProfile, QoSReliabilityPolicy, QoSHistoryPolicy, QoSDurabilityPolicy
 from sensor_msgs.msg import Image
-from std_msgs.msg import String
+from std_msgs.msg import String, Float32
 import cv2
 import numpy as np
 import threading
@@ -79,6 +79,7 @@ class AsyncTrafficLightDetector(Node):
         self.state_pub = self.create_publisher(String, '/traffic_state', 10)               # 대문자: RED, YELLOW, GREEN, NONE
         self.debug_img_pub = self.create_publisher(Image, '/traffic_light/debug_image', 10)# RViz2용 디버그 영상
         self.yolo_img_pub = self.create_publisher(Image, '/yolo_image', 1)                 # 기존 competition 토픽 호환
+        self.box_area_pub = self.create_publisher(Float32, '/traffic_box_area', 10)        # YOLO 박스 면적 비율 퍼블리셔
         self.crop_img_pub = self.create_publisher(Image, '/traffic_light/cropped_image', 10)
         
         # [토픽 안정화(Debouncing) 로직]
@@ -388,6 +389,18 @@ def main(args=None):
             state_msg = String()
             state_msg.data = node.last_published_state.upper()
             node.state_pub.publish(state_msg)
+
+            # [Plan B] 신호등 박스 면적 비율(%) 퍼블리시 (0.0 ~ 100.0)
+            area_msg = Float32()
+            if smooth_box is not None:
+                bx1, by1, bx2, by2 = [int(v) for v in smooth_box]
+                box_area = float((bx2 - bx1) * (by2 - by1))
+                frame_area = float(w * h)
+                area_ratio = (box_area / frame_area) * 100.0
+                area_msg.data = area_ratio
+            else:
+                area_msg.data = 0.0
+            node.box_area_pub.publish(area_msg)
 
             # 3) RViz2 시각화 영상 토픽 발행 (/traffic_light/debug_image)
             debug_view = upper_view.copy()
