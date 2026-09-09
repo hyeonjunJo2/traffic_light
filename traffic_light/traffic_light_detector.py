@@ -85,7 +85,11 @@ class AsyncTrafficLightDetector(Node):
         # [토픽 안정화(Debouncing) 로직]
         self.last_published_state = "none"
         self.none_counter = 0
-        self.NONE_THRESHOLD = 15  # 15프레임(약 0.5초) 연속 NONE이어야만 진짜 NONE으로 인정
+        self.NONE_THRESHOLD = 45  # 45프레임(약 1.5초) 연속 NONE이어야만 진짜 NONE으로 인정 (직전 상태 유지)
+
+        # 🚀 [4구간 신호차량 영구 유지(Latch) 로직]
+        self.final_lane_state = None
+        self.lane_detect_buffer = []
 
         self.latest_frame = None
         self.frame_lock = threading.Lock()
@@ -93,8 +97,7 @@ class AsyncTrafficLightDetector(Node):
         # 3. YOLO 비동기 작업 변수
         self.yolo_model = None
         self.is_custom_model = False
-        self.yolo_box = None
-        self.yolo_conf = 0.0
+        self.yolo_boxes_info = [] # (name, x1, y1, x2, y2, conf)
         self.yolo_lock = threading.Lock()
         self.yolo_conf_thresh = 0.25
         self.is_running = True
@@ -152,23 +155,18 @@ class AsyncTrafficLightDetector(Node):
                     device='cpu'
                 )
 
-                found_box = None
-                found_conf = 0.0
-                best_area = 0
-
+                found_boxes_info = []
                 for r in results:
                     for box in r.boxes:
                         bx1, by1, bx2, by2 = box.xyxy[0].cpu().numpy()
                         c = float(box.conf[0].cpu().numpy())
+                        name = r.names[int(box.cls[0].cpu().numpy())]
                         area = (bx2 - bx1) * (by2 - by1)
-                        if area > best_area and area > 100:
-                            best_area = area
-                            found_box = [bx1, by1, bx2, by2]
-                            found_conf = c
+                        if area > 100:
+                            found_boxes_info.append((name, bx1, by1, bx2, by2, c))
 
                 with self.yolo_lock:
-                    self.yolo_box = found_box
-                    self.yolo_conf = found_conf
+                    self.yolo_boxes_info = found_boxes_info
 
             except Exception:
                 pass
@@ -336,12 +334,14 @@ def main(args=None):
                         mean_v = int(np.mean(center_crop[:, :, 2]))
                         hsv_info_text = f"Live HSV -> H:{mean_h:2d} | S:{mean_s:3d} | V:{mean_v:3d}"
 
+                    # --- [하이브리드 모드] 평소엔 HSV, 위기엔 Plan B ---
                     r_cnt = cv2.countNonZero(r_mask_all[y1:y2, x1:x2])
                     y_cnt = cv2.countNonZero(y_mask_all[y1:y2, x1:x2])
                     g_cnt = cv2.countNonZero(g_mask_all[y1:y2, x1:x2])
-
+                    
                     max_c = max(r_cnt, y_cnt, g_cnt)
 
+                    # 1차 시도: 기존 HSV 픽셀 카운트 방식
                     if max_c >= min_pixel:
                         if max_c == r_cnt:
                             detected_state = "RED"
@@ -350,12 +350,50 @@ def main(args=None):
                         elif max_c == g_cnt:
                             detected_state = "GREEN"
 
-                    box_color = (0, 0, 255) if detected_state == "RED" else (0, 255, 255) if detected_state == "YELLOW" else (0, 255, 0) if detected_state == "GREEN" else (255, 255, 0)
-                    cv2.rectangle(upper_view, (x1, y1), (x2, y2), box_color, 2)
+                        box_color = (0, 0, 255) if detected_state == "RED" else (0, 255, 255) if detected_state == "YELLOW" else (0, 255, 0) if detected_state == "GREEN" else (255, 255, 0)
+                        cv2.rectangle(upper_view, (x1, y1), (x2, y2), box_color, 2)
+                        
+                        label_text = f"{detected_state} [{detect_source}] (R:{r_cnt} Y:{y_cnt} G:{g_cnt})"
+                        cv2.putText(upper_view, label_text, (x1, max(20, y1 - 8)), cv2.FONT_HERSHEY_SIMPLEX, 0.55, box_color, 2, cv2.LINE_AA)
                     
-                    label_text = f"{detected_state} [{detect_source}] (R:{r_cnt} Y:{y_cnt} G:{g_cnt})"
-                    cv2.putText(upper_view, label_text, (x1, max(20, y1 - 8)),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.55, box_color, 2, cv2.LINE_AA)
+                    # 2차 시도: 픽셀 수가 미달(백화현상 등)이면 Plan B 비상 발동!
+                    else:
+                        hsv_crop = hsv_all[y1:y2, x1:x2]
+                        v_channel = hsv_crop[:, :, 2] # 명도(밝기) 채널만 추출
+                        
+                        cw = x2 - x1
+                        step = cw / 4.0
+                        
+                        brightness = []
+                        for i in range(4):
+                            col_start = int(i * step)
+                            col_end = int((i + 1) * step) if i < 3 else cw
+                            section = v_channel[:, col_start:col_end]
+                            if section.size > 0:
+                                top_pixels = np.percentile(section, 90)
+                                mean_b = np.mean(section[section >= top_pixels]) if top_pixels > 0 else 0
+                            else:
+                                mean_b = 0
+                            brightness.append(mean_b)
+                        
+                        max_idx = np.argmax(brightness)
+                        max_b = brightness[max_idx]
+                        
+                        if max_b > 50:
+                            if max_idx == 0: detected_state = "RED"
+                            elif max_idx == 1: detected_state = "YELLOW"
+                            elif max_idx == 2: detected_state = "GREEN"
+                            elif max_idx == 3: detected_state = "GREEN"
+
+                        box_color = (0, 0, 255) if detected_state == "RED" else (0, 255, 255) if detected_state == "YELLOW" else (0, 255, 0) if detected_state == "GREEN" else (255, 255, 0)
+                        cv2.rectangle(upper_view, (x1, y1), (x2, y2), box_color, 2)
+                        
+                        for i in range(1, 4):
+                            lx = x1 + int(i * step)
+                            cv2.line(upper_view, (lx, y1), (lx, y2), (255, 255, 255), 1)
+                        
+                        label_text = f"[Plan B] {detected_state} (Zone:{max_idx+1})"
+                        cv2.putText(upper_view, label_text, (x1, max(20, y1 - 8)), cv2.FONT_HERSHEY_SIMPLEX, 0.55, box_color, 2, cv2.LINE_AA)
 
             # ------------------------------------------------------------------
             # 📢 [상태 변경 로그 출력]
@@ -371,7 +409,35 @@ def main(args=None):
                 else:
                     node.get_logger().info("⚪ [NONE] 신호차 없음")
 
-            # [토픽 안정화(Debouncing) 로직 적용]
+            # 🚀 [4구간 신호차량 로직 추가]
+            sign_boxes = [b for b in current_boxes_info if b[0] in ["sign_x", "sign_v", "sign_o"]]
+            if len(sign_boxes) >= 3 and node.final_lane_state is None:
+                # 가로(X) 좌표 순서로 정렬 (왼쪽부터 1번, 2번, 3번 전광판)
+                sign_boxes.sort(key=lambda x: x[1])
+                names = [b[0] for b in sign_boxes[:3]]
+                
+                # 초록/화살표(V)가 어디 있는지 파악
+                if names[0] in ["sign_v", "sign_o"]:
+                    node.lane_detect_buffer.append("lane_1")
+                elif names[1] in ["sign_v", "sign_o"]:
+                    node.lane_detect_buffer.append("lane_2")
+                
+                # 2초간 디버깅(확정 버퍼) - 약 30프레임 중 15번 이상이면 확정
+                if len(node.lane_detect_buffer) > 30:
+                    node.lane_detect_buffer.pop(0)
+                
+                if node.lane_detect_buffer.count("lane_1") >= 15:
+                    node.final_lane_state = "lane_1"
+                    node.get_logger().info("🔥 [신호차량 확정] 초록불이 1차선에 있습니다! 'lane_1' (직진) 무한 유지 시작!")
+                elif node.lane_detect_buffer.count("lane_2") >= 15:
+                    node.final_lane_state = "lane_2"
+                    node.get_logger().info("🔥 [신호차량 확정] 초록불이 2차선에 있습니다! 'lane_2' (차선변경) 무한 유지 시작!")
+
+            # 만약 신호차량 미션이 확정되었다면, 기존 색깔(detected_state) 다 무시하고 차선 강제 배정
+            if node.final_lane_state is not None:
+                detected_state = node.final_lane_state.upper()
+
+            # [토픽 안정화(Debouncing) 로직 적용 - 1.5초 유지]
             if detected_state != "NONE":
                 node.last_published_state = detected_state.lower()
                 node.none_counter = 0
@@ -380,7 +446,7 @@ def main(args=None):
                 if node.none_counter >= node.NONE_THRESHOLD:
                     node.last_published_state = "none"
 
-            # 1) 대회 미션매니저 연동 토픽 (/traffic_light : 소문자 red, yellow, green, none)
+            # 1) 대회 미션매니저 연동 토픽 (/traffic_light : 소문자 red, yellow, green, none, lane_1, lane_2)
             traf_msg = String()
             traf_msg.data = node.last_published_state
             node.traf_pub.publish(traf_msg)
@@ -405,7 +471,7 @@ def main(args=None):
             # 3) RViz2 시각화 영상 토픽 발행 (/traffic_light/debug_image)
             debug_view = upper_view.copy()
             status_text = f"STATE: {detected_state} (FPS: {fps})"
-            text_color = (0, 0, 255) if detected_state == "RED" else (0, 255, 255) if detected_state == "YELLOW" else (0, 255, 0) if detected_state == "GREEN" else (200, 200, 200)
+            text_color = (0, 0, 255) if detected_state == "RED" else (0, 255, 255) if detected_state == "YELLOW" else (0, 255, 0) if detected_state == "GREEN" else (255, 100, 255) if "LANE" in detected_state else (200, 200, 200)
             cv2.putText(debug_view, status_text, (20, 35), cv2.FONT_HERSHEY_SIMPLEX, 0.8, text_color, 2, cv2.LINE_AA)
 
             # 🔍 화면 상단에 실시간 HSV 계측기 정보 출력!
