@@ -275,8 +275,23 @@ def main(args=None):
             detect_source = "NONE"
 
             with node.yolo_lock:
-                curr_yolo_box = node.yolo_box
-                curr_yolo_conf = node.yolo_conf
+                try:
+                    current_boxes_info = node.yolo_boxes_info.copy()
+                except AttributeError:
+                    current_boxes_info = []
+
+            curr_yolo_box = None
+            curr_yolo_conf = 0.0
+            best_area = 0
+            
+            for b in current_boxes_info:
+                name, bx1, by1, bx2, by2, c = b
+                if name == "traffic_light":
+                    area = (bx2 - bx1) * (by2 - by1)
+                    if area > best_area:
+                        best_area = area
+                        curr_yolo_box = [bx1, by1, bx2, by2]
+                        curr_yolo_conf = c
 
             if curr_yolo_box is not None:
                 target_box = curr_yolo_box
