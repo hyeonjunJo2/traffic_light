@@ -22,7 +22,7 @@ def nothing(x):
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(BASE_DIR, 'hsv_config.json')
-CUSTOM_MODEL_PATH = os.path.join(BASE_DIR, 'best.pt')
+CUSTOM_MODEL_PATH = os.path.join(BASE_DIR, 'best_openvino_model')
 
 DEFAULT_CONFIG = {
     "Brightness_Min_V": 100,
