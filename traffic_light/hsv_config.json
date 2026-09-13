@@ -7,6 +7,6 @@
     "Yellow_H_Max": 35,
     "Green_H_Min": 35,
     "Green_H_Max": 90,
-    "YOLO_Conf_Thresh": 60,
-    "Min_Pixel_Count": 60
+    "YOLO_Conf_Thresh": 35,
+    "Min_Pixel_Count": 20
 }

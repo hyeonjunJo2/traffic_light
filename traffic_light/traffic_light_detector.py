@@ -22,7 +22,7 @@ def nothing(x):
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(BASE_DIR, 'hsv_config.json')
-CUSTOM_MODEL_PATH = os.path.join(BASE_DIR, 'best_openvino_model')
+CUSTOM_MODEL_PATH = os.path.join(BASE_DIR, 'best.pt')
 
 DEFAULT_CONFIG = {
     "Brightness_Min_V": 100,
@@ -173,6 +173,41 @@ class AsyncTrafficLightDetector(Node):
 
             time.sleep(0.01)
 
+class NumberTuner:
+    """★2026-09-12 통합: OpenCV 슬라이더 대신 숫자 입력칸 + 위아래(±1) 버튼 패널(Tkinter Spinbox).
+    사용자 요청: 슬라이더가 불편 → 값을 직접 타이핑하거나 화살표로 1씩 조정. get(이름)으로 현재값 읽기, 매 루프 update() 호출."""
+    def __init__(self, title, fields):
+        import tkinter as tk
+        self.tk = tk
+        self.root = tk.Tk(); self.root.title(title); self.root.resizable(False, False)
+        self.vars = {}
+        for row, (name, lo, hi, val) in enumerate(fields):
+            tk.Label(self.root, text=name, anchor='w', width=20).grid(row=row, column=0, padx=6, pady=3, sticky='w')
+            v = tk.IntVar(value=int(max(lo, min(hi, val))))
+            sb = tk.Spinbox(self.root, from_=lo, to=hi, textvariable=v, width=6, increment=1, justify='right')
+            sb.grid(row=row, column=1, padx=4, pady=3)
+            tk.Label(self.root, text=f'({lo}~{hi})', fg='gray').grid(row=row, column=2, sticky='w')
+            self.vars[name] = (v, lo, hi)
+        self.save_requested = False
+        tk.Button(self.root, text='저장 (s)', command=self._save).grid(row=len(fields), column=0, columnspan=3, pady=8, sticky='we')
+        self.root.protocol('WM_DELETE_WINDOW', lambda: None)   # 창 닫기 무시(메인 루프가 관리)
+    def _save(self):
+        self.save_requested = True
+    def get(self, name):
+        v, lo, hi = self.vars[name]
+        try:
+            x = int(v.get())
+        except Exception:
+            x = lo
+        x = max(lo, min(hi, x))
+        return x
+    def update(self):
+        try:
+            self.root.update_idletasks(); self.root.update()
+        except Exception:
+            pass
+
+
 def main(args=None):
     rclpy.init(args=args)
     node = AsyncTrafficLightDetector()
@@ -187,24 +222,37 @@ def main(args=None):
 
     # 🎛️ 실시간 튜너 창
     tuner_win = "HSV / Color Tuner"
-    cv2.namedWindow(tuner_win, cv2.WINDOW_NORMAL)
-    cv2.resizeWindow(tuner_win, 450, 480)
+    tuner = NumberTuner(tuner_win, [
+        ("Brightness (Min V)", 0, 255, cfg.get("Brightness_Min_V", 100)),
+        ("Saturation (Min S)", 0, 255, cfg.get("Saturation_Min_S", 80)),
+        ("Red1 H Max",         0, 30,  cfg.get("Red1_H_Max", 12)),
+        ("Red2 H Min",         0, 180, cfg.get("Red2_H_Min", 165)),
+        ("Yellow H Min",       0, 60,  cfg.get("Yellow_H_Min", 13)),
+        ("Yellow H Max",       0, 60,  cfg.get("Yellow_H_Max", 35)),
+        ("Green H Min",        0, 120, cfg.get("Green_H_Min", 40)),
+        ("Green H Max",        0, 140, cfg.get("Green_H_Max", 90)),
+        ("YOLO Conf (%)",      0, 100, cfg.get("YOLO_Conf_Thresh", 25)),
+        ("Min Pixel Count",    0, 500, cfg.get("Min_Pixel_Count", 40)),
+    ])
+    tuner.update()                                  # 창 즉시 표시
 
-    cv2.createTrackbar("Brightness (Min V)", tuner_win, cfg.get("Brightness_Min_V", 100), 255, nothing)
-    cv2.createTrackbar("Saturation (Min S)", tuner_win, cfg.get("Saturation_Min_S", 80), 255, nothing)
-    cv2.createTrackbar("Red1 H Max", tuner_win, cfg.get("Red1_H_Max", 12), 30, nothing)
-    cv2.createTrackbar("Red2 H Min", tuner_win, cfg.get("Red2_H_Min", 165), 180, nothing)
-    cv2.createTrackbar("Yellow H Min", tuner_win, cfg.get("Yellow_H_Min", 13), 60, nothing)
-    cv2.createTrackbar("Yellow H Max", tuner_win, cfg.get("Yellow_H_Max", 35), 60, nothing)
-    cv2.createTrackbar("Green H Min", tuner_win, cfg.get("Green_H_Min", 40), 120, nothing)
-    cv2.createTrackbar("Green H Max", tuner_win, cfg.get("Green_H_Max", 90), 140, nothing)
-    cv2.createTrackbar("YOLO Conf (%)", tuner_win, cfg.get("YOLO_Conf_Thresh", 25), 100, nothing)
-    cv2.createTrackbar("Min Pixel Count", tuner_win, cfg.get("Min_Pixel_Count", 40), 500, nothing)
 
     last_state = "NONE"
     smooth_box = None
     box_hold_count = 0
-    MAX_HOLD_FRAMES = 12
+    import collections as _co
+    recent_yolo = _co.deque(maxlen=30)  # ★(시각, 박스유무) 이력 — 시간 기준 확정 규칙용
+    CONFIRM_WINDOW_S, CONFIRM_MIN, CONFIRM_RATIO = 0.6, 3, 0.5   # ★최근 0.6초의 YOLO 시도 중 절반 이상(최소 3회) 검출이면 인정
+                                                                 #   (횟수 고정은 YOLO 속도에 따라 너무 빡빡/느슨해짐 → 비율로)
+    USE_PLAN_B = False                       # ★박스 4등분 밝기 위치 판정(백화 대비). 우리 코스(3구/4구 혼재)엔 부적합 → 끔
+    HOLD_S = 1.0                             # ★박스 유지 1.0초(놓침 사이를 잇는 시간. 0.5는 중간에 박스가 자주 사라짐)
+    VOTE_S = 0.6                             # ★색 다수결 창 0.6초
+    last_box_time = 0.0
+    MAX_HOLD_FRAMES = 15          # ★12→30→15(≈0.5초, 2026-09-12): 놓침은 잇되 옛 위치를 오래 붙들지 않게
+    SMOOTH_ALPHA = 1.0            # ★0.35→1.0: 평균 없이 최신 박스 그대로(접근 중 이동이 빨라 평균은 지연만 만듦)
+    BOX_PAD_W, BOX_PAD_H = 0.30, 0.40   # ★색 판정용 박스 여유(가로 30%·세로 40%): 타이트한 YOLO 박스가 램프를 자르는 것 방지
+    state_hist = _co.deque(maxlen=60)   # ★(시각, 색) 이력 — VOTE_S 초 안의 다수결
+    USE_COLOR_FALLBACK = False    # ★YOLO 박스 없을 때 색 덩어리로 박스 대체하는 폴백. 대회장 콘·차량 오판 방지로 꺼둠
 
     zoom_win_opened = False
     current_cfg = cfg.copy()
@@ -215,6 +263,7 @@ def main(args=None):
 
     try:
         while rclpy.ok():
+            tuner.update()                          # ★숫자 패널은 영상이 없어도 매 루프 갱신(안 하면 창이 안 그려짐)
             current_frame = None
             with node.frame_lock:
                 if node.latest_frame is not None:
@@ -230,16 +279,16 @@ def main(args=None):
                 fps_counter = 0
                 fps_time = time.time()
 
-            v_min = cv2.getTrackbarPos("Brightness (Min V)", tuner_win)
-            s_min = cv2.getTrackbarPos("Saturation (Min S)", tuner_win)
-            r1_max = cv2.getTrackbarPos("Red1 H Max", tuner_win)
-            r2_min = cv2.getTrackbarPos("Red2 H Min", tuner_win)
-            y_min = cv2.getTrackbarPos("Yellow H Min", tuner_win)
-            y_max = cv2.getTrackbarPos("Yellow H Max", tuner_win)
-            g_min = cv2.getTrackbarPos("Green H Min", tuner_win)
-            g_max = cv2.getTrackbarPos("Green H Max", tuner_win)
-            conf_val = cv2.getTrackbarPos("YOLO Conf (%)", tuner_win)
-            min_pixel = cv2.getTrackbarPos("Min Pixel Count", tuner_win)
+            v_min = tuner.get("Brightness (Min V)")
+            s_min = tuner.get("Saturation (Min S)")
+            r1_max = tuner.get("Red1 H Max")
+            r2_min = tuner.get("Red2 H Min")
+            y_min = tuner.get("Yellow H Min")
+            y_max = tuner.get("Yellow H Max")
+            g_min = tuner.get("Green H Min")
+            g_max = tuner.get("Green H Max")
+            conf_val = tuner.get("YOLO Conf (%)")
+            min_pixel = tuner.get("Min Pixel Count")
 
             node.yolo_conf_thresh = max(0.1, conf_val / 100.0)
 
@@ -286,17 +335,32 @@ def main(args=None):
             
             for b in current_boxes_info:
                 name, bx1, by1, bx2, by2, c = b
-                if name == "traffic_light":
+                if name in ("traffic_light", "traffic-light", "traffic-outdoor"):   # 모델 버전마다 클래스 이름이 다름(하이픈/밑줄) — 2026-09-12 통합 시 발견
                     area = (bx2 - bx1) * (by2 - by1)
                     if area > best_area:
                         best_area = area
                         curr_yolo_box = [bx1, by1, bx2, by2]
                         curr_yolo_conf = c
 
-            if curr_yolo_box is not None:
+            # ★확정 규칙(2026-09-12): 이번 박스가 최근 5회 중 3회 이상과 겹칠 때만 인정 → 표지판·기둥 단발 오검출 차단
+            _now = time.time()
+            _sig = (tuple(round(v, 1) for v in curr_yolo_box) if curr_yolo_box is not None else None, len(current_boxes_info))
+            if _sig != getattr(node, '_last_yolo_sig', object()):   # YOLO 결과가 바뀐 경우만 1회로 센다(화면 루프가 더 빠름)
+                node._last_yolo_sig = _sig
+                recent_yolo.append((_now, curr_yolo_box is not None))
+            def _iou(a, b):
+                ix1, iy1 = max(a[0], b[0]), max(a[1], b[1]); ix2, iy2 = min(a[2], b[2]), min(a[3], b[3])
+                inter = max(0.0, ix2 - ix1) * max(0.0, iy2 - iy1)
+                ua = (a[2] - a[0]) * (a[3] - a[1]) + (b[2] - b[0]) * (b[3] - b[1]) - inter
+                return inter / ua if ua > 0 else 0.0
+            # 위치 조건은 두지 않는다 — 접근 중엔 박스가 프레임마다 크게 움직여 이전 박스와 안 겹침(지연의 원인이었음)
+            _win_hits = [(_t, _has) for (_t, _has) in recent_yolo if _now - _t <= CONFIRM_WINDOW_S]
+            _n_hit = sum(1 for (_t, _has) in _win_hits if _has)
+            confirmed = (curr_yolo_box is not None and _n_hit >= CONFIRM_MIN and _n_hit >= CONFIRM_RATIO * max(1, len(_win_hits)))
+            if confirmed:
                 target_box = curr_yolo_box
                 detect_source = f"YOLO ({curr_yolo_conf:.2f})"
-            else:
+            elif USE_COLOR_FALLBACK:   # ★2026-09-12 통합: 기본 꺼짐 — 신호등(YOLO 박스)을 찾았을 때만 색 판정(콘·차량 오판 방지)
                 contours, _ = cv2.findContours(combined_all, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
                 if contours:
                     largest = max(contours, key=cv2.contourArea)
@@ -311,16 +375,15 @@ def main(args=None):
             # 스무딩
             if target_box is not None:
                 box_hold_count = MAX_HOLD_FRAMES
+                last_box_time = _now
                 if smooth_box is None:
                     smooth_box = [float(v) for v in target_box]
                 else:
-                    alpha = 0.35
+                    alpha = SMOOTH_ALPHA
                     for i in range(4):
                         smooth_box[i] = (1 - alpha) * smooth_box[i] + alpha * target_box[i]
             else:
-                if box_hold_count > 0:
-                    box_hold_count -= 1
-                else:
+                if _now - last_box_time > HOLD_S:   # ★시간 기준 유지: 0.5초 넘게 못 찾으면 박스 해제
                     smooth_box = None
 
             detected_state = "NONE"
@@ -330,8 +393,9 @@ def main(args=None):
             # 색상 판별
             if smooth_box is not None:
                 x1, y1, x2, y2 = [int(v) for v in smooth_box]
-                x1, y1 = max(0, x1), max(0, y1)
-                x2, y2 = min(uw, x2), min(uh, y2)
+                _pw = int((x2 - x1) * BOX_PAD_W); _ph = int((y2 - y1) * BOX_PAD_H)   # ★박스 여유
+                x1, y1 = max(0, x1 - _pw), max(0, y1 - _ph)
+                x2, y2 = min(uw, x2 + _pw), min(uh, y2 + _ph)
 
                 if (x2 - x1) > 10 and (y2 - y1) > 10:
                     cropped_view = upper_view[y1:y2, x1:x2]
@@ -355,6 +419,11 @@ def main(args=None):
                     g_cnt = cv2.countNonZero(g_mask_all[y1:y2, x1:x2])
                     
                     max_c = max(r_cnt, y_cnt, g_cnt)
+                    # ★2026-09-12: 박스는 있으면 항상 그린다(색 미확정이면 회색). 전엔 색 픽셀이 Min Pixel 미만인 순간
+                    #   사각형을 안 그려 "박스가 사라진다"고 보였음(실제 박스·상태는 유지되고 있었음)
+                    cv2.rectangle(upper_view, (x1, y1), (x2, y2), (160, 160, 160), 1)
+                    cv2.putText(upper_view, f"box R:{r_cnt} Y:{y_cnt} G:{g_cnt} (min {min_pixel})", (x1, min(uh - 4, y2 + 16)),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.45, (160, 160, 160), 1, cv2.LINE_AA)
 
                     # 1차 시도: 기존 HSV 픽셀 카운트 방식
                     if max_c >= min_pixel:
@@ -372,8 +441,10 @@ def main(args=None):
                         cv2.putText(upper_view, label_text, (x1, max(20, y1 - 8)), cv2.FONT_HERSHEY_SIMPLEX, 0.55, box_color, 2, cv2.LINE_AA)
                     
                     # 2차 시도: 픽셀 수가 미달(백화현상 등)이면 Plan B 비상 발동!
-                    else:
-                        hsv_crop = hsv_all[y1:y2, x1:x2]
+                    elif USE_PLAN_B:   # ★2026-09-12 기본 꺼짐: 3구 신호등엔 4등분이 안 맞고 여유 박스와 충돌 → 오판 원인
+                        _bx1, _by1, _bx2, _by2 = [int(v) for v in smooth_box]       # Plan B는 여유 없는 원래 박스로
+                        _bx1, _by1 = max(0, _bx1), max(0, _by1); _bx2, _by2 = min(uw, _bx2), min(uh, _by2)
+                        hsv_crop = hsv_all[_by1:_by2, _bx1:_bx2]
                         v_channel = hsv_crop[:, :, 2] # 명도(밝기) 채널만 추출
                         
                         cw = x2 - x1
@@ -411,6 +482,21 @@ def main(args=None):
                         cv2.putText(upper_view, label_text, (x1, max(20, y1 - 8)), cv2.FONT_HERSHEY_SIMPLEX, 0.55, box_color, 2, cv2.LINE_AA)
 
             # ------------------------------------------------------------------
+            # ★다수결(2026-09-12): 최근 STATE_VOTE 프레임에서 가장 많은 색이 과반이면 그 색, 아니면 직전 확정 상태 유지
+            state_hist.append((_now, detected_state))
+            _win = [c for (_t, c) in state_hist if _now - _t <= VOTE_S]
+            _cnt = _co.Counter(c for c in _win if c != "NONE")
+            if _cnt:
+                _top, _n = _cnt.most_common(1)[0]
+                if _n * 2 > len(_win):
+                    detected_state = _top
+                elif last_state != "NONE" and _cnt.get(last_state, 0) > 0:
+                    detected_state = last_state
+                else:
+                    detected_state = "NONE"
+            else:
+                detected_state = "NONE"
+
             # 📢 [상태 변경 로그 출력]
             # ------------------------------------------------------------------
             if detected_state != last_state:
@@ -494,6 +580,8 @@ def main(args=None):
                 cv2.putText(debug_view, hsv_info_text, (20, 65), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 255, 255), 2, cv2.LINE_AA)
 
             try:
+                if node.debug_img_pub.get_subscription_count() == 0 and node.yolo_img_pub.get_subscription_count() == 0:
+                    raise RuntimeError('no debug subscribers')   # ★구독자 없으면 발행 생략(성능) — 아래 except가 삼킴
                 debug_img_msg = Image()
                 debug_img_msg.header.stamp = node.get_clock().now().to_msg()
                 debug_img_msg.header.frame_id = "camera_color_frame"
@@ -508,8 +596,11 @@ def main(args=None):
                 pass
 
             # 4) 화면 출력
-            cv2.imshow("Full Camera (YOLO Detection)", debug_view)
-            cv2.imshow("HSV Mask (Debug)", combined_all)
+            # ★표시용만 절반 크기(2026-09-12): 1280폭 창 3개를 매 프레임 그리면 그것만으로 100ms↑ → 6 FPS의 원인
+            _dv = cv2.resize(debug_view, (debug_view.shape[1] // 2, debug_view.shape[0] // 2))
+            _cm = cv2.resize(combined_all, (combined_all.shape[1] // 2, combined_all.shape[0] // 2))
+            cv2.imshow("Full Camera (YOLO Detection)", _dv)
+            cv2.imshow("HSV Mask (Debug)", _cm)
 
             if cropped_view is not None and cropped_view.size > 0:
                 zoom_display = cv2.resize(cropped_view, (250, 250), interpolation=cv2.INTER_LINEAR)
@@ -522,7 +613,9 @@ def main(args=None):
             cv2.imshow("Traffic Light Zoom (Crop)", zoom_display)
 
             key = cv2.waitKey(1) & 0xFF
-            if key == ord('s'):
+            tuner.update()                          # ★숫자 패널 이벤트 처리(매 루프)
+            if key == ord('s') or tuner.save_requested:
+                tuner.save_requested = False
                 save_config(current_cfg)
             elif key == ord('p'):
                 print("\n" + "=" * 50)
